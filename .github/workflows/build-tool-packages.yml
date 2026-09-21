@@ -215,17 +215,58 @@ jobs:
         release_id=$(gh release view "$tag_name" --repo "$GITHUB_REPOSITORY" --json databaseId --jq '.databaseId')
         echo "id=$release_id" >> $GITHUB_OUTPUT
 
-    - name: Generate hash for packages
+    - name: Generate SHA256 hashes for packages
       run: |
-        $childItems = Get-Childitem -Path '.'
-        $childItems | Foreach-Object {
-          $packageObj = Get-Childitem -Path $_.FullName | Select-Object -First 1
+        $hashFile = 'hashes.sha256'
+
+        # Add-Content appends, so start from a clean file on every run
+        if (Test-Path $hashFile) { Remove-Item $hashFile }
+
+        # Artifacts are downloaded into one subdirectory per artifact,
+        # so each package file lives one level down.
+        Get-ChildItem -Path '.' -Directory | ForEach-Object {
+          $packageObj = Get-ChildItem -Path $_.FullName -File | Select-Object -First 1
+          if (-not $packageObj) { return }
+
           Write-Host "Package: $($packageObj.Name)"
-          $actualHash = (Get-FileHash -Path $packageObj.FullName -Algorithm sha256).Hash
-          $hashString = "$actualHash $($packageObj.Name)"
-          Write-Host "$hashString"
-          Add-Content -Path ./hashes.sha256 -Value "$hashString"
-        } 
+
+          # Lower-case matches the convention used by sha256sum
+          $hash = (Get-FileHash -Path $packageObj.FullName -Algorithm SHA256).Hash.ToLower()
+
+          # Binary mode: "<hash> *<filename>".
+          # A single space is not a valid separator for sha256sum/cksum.
+          $content = '{0} *{1}' -f $hash, $packageObj.Name
+
+          Write-Host $content
+          Add-Content -Path $hashFile -Value $content -Encoding utf8
+        }
+
+    - name: Verify hashes
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [[ ! -s hashes.sha256 ]]; then
+          echo "Error: hashes.sha256 is missing or empty."
+          exit 1
+        fi
+
+        # Entries use plain filenames, but each package sits inside its own
+        # artifact directory, so check every line from the directory that
+        # holds the file it refers to.
+        while IFS= read -r line; do
+          [[ -n "$line" ]] || continue
+
+          name="${line#* \*}"
+          dir="$(find . -mindepth 2 -maxdepth 2 -type f -name "$name" -printf '%h\n' | head -1)"
+
+          if [[ -z "$dir" ]]; then
+            echo "Error: no file found for checksum entry: $name"
+            exit 1
+          fi
+
+          ( cd "$dir" && printf '%s\n' "$line" | sha256sum --check --strict --warn - )
+        done < hashes.sha256
 
     - name: Upload release assets
       uses: actions/github-script@v9
