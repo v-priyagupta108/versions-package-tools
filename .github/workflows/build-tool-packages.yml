@@ -217,15 +217,37 @@ jobs:
 
     - name: Generate hash for packages
       run: |
-        $childItems = Get-Childitem -Path '.'
+        $hashFile = './hashes.sha256'
+        if (Test-Path $hashFile) { Remove-Item $hashFile }
+        $childItems = Get-Childitem -Path '.' -Directory
         $childItems | Foreach-Object {
-          $packageObj = Get-Childitem -Path $_.FullName | Select-Object -First 1
+          $packageObj = Get-Childitem -Path $_.FullName -File | Select-Object -First 1
+          if (-not $packageObj) { return }
           Write-Host "Package: $($packageObj.Name)"
-          $actualHash = (Get-FileHash -Path $packageObj.FullName -Algorithm sha256).Hash
-          $hashString = "$actualHash $($packageObj.Name)"
+          $actualHash = (Get-FileHash -Path $packageObj.FullName -Algorithm sha256).Hash.ToLower()
+          $hashString = "$actualHash *$($packageObj.Name)"
           Write-Host "$hashString"
-          Add-Content -Path ./hashes.sha256 -Value "$hashString"
+          Add-Content -Path $hashFile -Value "$hashString" -Encoding utf8
         } 
+
+    - name: Verify hashes
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ ! -s hashes.sha256 ]]; then
+          echo "Error: hashes.sha256 is missing or empty."
+          exit 1
+        fi
+        while IFS= read -r line; do
+          [[ -n "$line" ]] || continue
+          name="${line#* \*}"
+          dir="$(find . -mindepth 2 -maxdepth 2 -type f -name "$name" -printf '%h\n' | head -1)"
+          if [[ -z "$dir" ]]; then
+            echo "Error: no file found for checksum entry: $name"
+            exit 1
+          fi
+          ( cd "$dir" && printf '%s\n' "$line" | sha256sum --check --strict --warn - )
+        done < hashes.sha256
 
     - name: Upload release assets
       uses: actions/github-script@v9
